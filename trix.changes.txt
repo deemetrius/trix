@@ -1,0 +1,43 @@
+CHANGELOG
+2017-04-02 #7
+	added	else
+			elseif
+	also:	Redid some conversion to plain tokens (delimiters, block closers, else)
+2017-02-18 #6
+	added	$trix->skip_count
+	also:	renamed to trix // from: late_bee tpl_bee
+			re-layer to 3 instead of 2
+			some minor fixes and changes
+			php 7 is now required // mail me if you wish this for php 5.6 or earlier
+			updated information and sample code // see: comment on top
+2016-10-03 #1
+	added	{if expr}...{/if}
+			{foreach expr}...{/foreach}
+			{each expr}...{/each} // same as {foreach}
+			* as naive realisation *
+			no expression check
+			no open/close pair check
+			no nested sequence check
+			no full smarty compatibility
+2016-05-18 #3
+	added	{* comments *}
+	note:	unclosed comments are ignored
+			comments will not be saved to resulting file in anyhow
+	also:	you should avoid such sequences '{*' or "*}" in strings (like so in JS strings or in attribute values)
+	
+	added	{ldelim} {ld} {rdelim} {rd}
+2016-05-12 #4
+	added	{literal}{/literal}
+	note:	unclosed literal is ignored
+<prior>
+	variables $var.key->property|modifier
+	empty modifiers in $var| will be replaced by default modifier setting if provided
+	modifiers could be chained: $var|mod1|mod2
+	
+	raw modifiers introduced: [raw_mod => [prefix, ending]]
+	$var|raw_mod	(prefix $var ending)
+	simple modifiers still allowed: [simp_mod => func_name]
+	$var|simp_mod	func_name( $var )
+	
+	common modifiers introduced (aka static modifiers): add_common_modifiers()
+	per-instance modifiers still allowed via: add_modifiers()
