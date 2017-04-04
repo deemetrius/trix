@@ -15,9 +15,35 @@ That fat guy spreaded to lots of files is not my style
 
 requirements: PHP 7
 
+	#	tpl/sample_template.tpl
+<p>Do you like {$fruit|}?</p>
+
+	#	tplc/sample_template.php
+<p>Do you like <?php echo htmlspecialchars($fruit, ENT_COMPAT | ENT_HTML5, 'UTF-8', true); ?>?</p>
+
+	#	USAGE of trix:
+
+include 'trix.php'; // or via autoloader either
+// describe common modifiers
+$mods = [
+	'escape' => ['htmlspecialchars(', ', ENT_COMPAT | ENT_HTML5, \'UTF-8\', true)'],
+	'intval' => 'intval',
+];
+trix::add_common_modifiers($mods); // per-class
+// run trix parser on source template file
+$trix = new trix('tpl/sample_template.tpl', '|escape');
+// local modifiers is allowed
+$mods = [ 'floatval' => 'floatval' ];
+$trix->add_modifiers($mods); // per-instance
+// convert and save to destination PHP file
+$trix->convert()->save_compiled('tplc/sample_template.php'); // note: Usually do not convert twice ^_^
+echo $trix->skip_count; // zero is ok
+
+	#	USAGE of result:
+
 // Once we got compiled file ... we able to use it very easy ... without trix
 $fruit = 'banana'; // assign
-include 'tpl_c/sample_template.php'; // fetch
+include 'tplc/sample_template.php'; // fetch
 */
 
 abstract class base_trix // modifiers layer
@@ -62,7 +88,11 @@ abstract class base_trix // modifiers layer
 
 class parser_trix extends base_trix // conversion layer
 {
-	const name_char = 'a-zA-Z0-9_';
+	const
+	name_char = 'a-zA-Z0-9_',
+	part_sub = '(?P<sub>(?:(?:\\.|\\-\\>)['. self::name_char .']+)*)',
+	part_mod = '(?P<mod>(?:\\|['. self::name_char .']*)*)',
+	part_member = '(?P<class>['. self::name_char .']+)(?P<dot>\\:|\\.)(?P<member>['. self::name_char .']+)';
 	
 	public
 	$parts = [],
@@ -83,13 +113,15 @@ class parser_trix extends base_trix // conversion layer
 		
 		// comment
 		$pattern = '~^\\*.*\\*$~us';
-		if( preg_match($pattern, $v, $matches) ) break;
+		if( preg_match($pattern, $v, $matches) )
+		break;
 		
 		// literal
 		$pattern = '~^literal\\}(?P<raw>.+)\\{\\/literal$~us';
 		if( preg_match($pattern, $v, $matches) )
 		{
-			$result = $this->deduce_literal($v, $matches); break;
+			$result = $matches['raw'] ?? null;
+			break;
 		}
 		
 		// plain tokens
@@ -112,23 +144,37 @@ class parser_trix extends base_trix // conversion layer
 			break;
 		}
 		
-		// variable
-		$pattern = '~^\\$(['. self::name_char .']+)(?P<sub>(?:(?:\\.|\\-\\>)['. self::name_char .']+)*)(?P<mod>(?:\\|['. self::name_char .']*)*)$~u';
-		if( preg_match($pattern, $v, $matches) )
+		/* // ksi ~ variant of next block about var
+		'~^\\$([' % &.name_char ']+)' &.part_sub &.part_mod '$~u' =>
+		$pattern preg_match $v $matches ? #0 :
+		'~^&' % &.part_member &.part_sub &.part_mod '$~u' =>
+		$pattern preg_match $v $matches ? #1 :
+		# ; => $case is &bool ?
+			$.default_modifier !== '' and
+			$ process_default_modifiers $v and
+			$pattern preg_match $v $matches ? $.skip_count += 1 :
+			$ deduce_variable $v $matches $case => $result ;
+			# break#
+		;
+		*/
+		// variable (or static member)
+		$case = null;
+		$pattern = '~^\\$(['. self::name_char .']+)'. self::part_sub . self::part_mod .'$~u';
+		if( preg_match($pattern, $v, $matches) ) $case = false;
+		else
 		{
-			// process default modifier (aka empty modifier) magic replacement if needed
-			if( $this->default_modifier === '')
-			$result = $this->deduce_variable($v, $matches);
-			else
-			{
-				$count = null;
-				$v2 = preg_replace('~\\|(?!['. self::name_char .'])~u', $this->default_modifier, $v, -1, $count);
-				if( $count ) $v = $v2;
-				if( preg_match($pattern, $v, $matches) )
-				$result = $this->deduce_variable($v, $matches);
-				else $this->skip_count += 1;
-			}
-			
+			// static member
+			$pattern = '~^&'. self::part_member . self::part_sub . self::part_mod .'$~u';
+			if( preg_match($pattern, $v, $matches) ) $case = true;
+		}
+		if( is_bool($case) )
+		{
+			if(
+				$this->default_modifier !== '' &&
+				$this->process_default_modifiers($v) &&
+				(!preg_match($pattern, $v, $matches)) // matches recapture
+			) /*skip!*/ $this->skip_count += 1; else
+			$result = $this->deduce_variable($v, $matches, $case);
 			break;
 		}
 		
@@ -136,36 +182,41 @@ class parser_trix extends base_trix // conversion layer
 		$pattern = '~^(?P<type>if|elseif|foreach|each)\\s+(?P<expr>.*)$~u';
 		if( preg_match($pattern, $v, $matches) )
 		{
-			$result = $this->deduce_block_opener($v, $matches); break;
+			if( ($repl = $matches['type']) == 'each' ) $repl = 'foreach';
+			$result = '<?php '. $repl .'( '. $matches['expr'] .' ): ?>';
+			break;
 		}
 		
+		// skip occured!
 		$this->skip_count += 1;
 		
 		}while( 0 );
 		return $result;
 	}
 	
-	protected function deduce_literal($v, $matches)
-	{ return $matches['raw'] ?? null; }
-	
-	protected function deduce_block_opener($v, $matches)
+	protected function process_default_modifiers(&$v)
 	{
-		$repl = array('if'=>'if', 'elseif'=>'elseif', 'foreach'=>'foreach', 'each'=>'foreach');
-		return '<?php '. $repl[$matches['type']] .'( '. $matches['expr'] .' ): ?>';
+		$count = null;
+		$v2 = preg_replace('~\\|(?!['. self::name_char .'])~u', $this->default_modifier, $v, -1, $count);
+		if( $count ) $v = $v2;
+		
+		return $count;
 	}
 	
-	protected function deduce_variable($v, $matches)
+	protected function deduce_variable($v, $matches, $is_static = false)
 	{
-		$result = '$'. $matches[1];
+		$result = $is_static ? (
+			$matches['class'] .'::'. ($matches['dot'] == '.' ? '$' : '') . $matches['member']
+		) : ('$'. $matches[1]);
 		
 		// process array elements and class properties
-		if( array_key_exists($k='sub', $matches) )
-		$result .= preg_replace('~\\.(['. self::name_char .']+)~u', "['\\1']", $matches[$k]);
+		if( $k = $matches['sub'] ?? false )
+		$result .= preg_replace('~\\.(['. self::name_char .']+)~u', "['\\1']", $k);
 		
 		// process modifiers
-		if( array_key_exists($k='mod', $matches) )
+		if( $k = $matches['mod'] ?? false )
 		{
-			$mods = preg_split('~\\|~u', $matches[$k], -1, PREG_SPLIT_NO_EMPTY);
+			$mods = preg_split('~\\|~u', $k, -1, PREG_SPLIT_NO_EMPTY);
 			if( count($mods) )
 			foreach( $mods as $modifier )
 			if( $mod = $this->modifier_find($modifier) )
@@ -207,3 +258,57 @@ class trix extends parser_trix
 		file_put_contents($file, $this->parts) : null;
 	}
 }
+
+/*		CHANGELOG
+2017-04-04 #2
+	also:	small fix
+2017-04-03 #1
+	added	static members (class constant, class static variable)
+			{&lane.path}
+				echo lane::$path;
+			{&lane:message}
+				echo lane::message;
+	also:	Some conversions are now made inside deduce (literals, block openers) now w/o extra fn-call
+2017-04-02 #7
+	added	else
+			elseif
+	also:	Redid some conversion to plain tokens (delimiters, block closers, else)
+2017-02-18 #6
+	added	$trix->skip_count
+	also:	renamed to trix // from: late_bee tpl_bee
+			re-layer to 3 instead of 2
+			some minor fixes and changes
+			php 7 is now required // mail me if you wish this for php 5.6 or earlier
+			updated information and sample code // see: comment on top
+2016-10-03 #1
+	added	{if expr}...{/if}
+			{foreach expr}...{/foreach}
+			{each expr}...{/each} // same as {foreach}
+			* as naive realisation *
+			no expression check
+			no open/close pair check
+			no nested sequence check
+			no full smarty compatibility
+2016-05-18 #3
+	added	{* comments *}
+	note:	unclosed comments are ignored
+			comments will not be saved to resulting file in anyhow
+	also:	you should avoid such sequences '{*' or "*}" in strings (like so in JS strings or in attribute values)
+	
+	added	{ldelim} {ld} {rdelim} {rd}
+2016-05-12 #4
+	added	{literal}{/literal}
+	note:	unclosed literal is ignored
+<prior>
+	variables $var.key->property|modifier
+	empty modifiers in $var| will be replaced by default modifier setting if provided
+	modifiers could be chained: $var|mod1|mod2
+	
+	raw modifiers introduced: [raw_mod => [prefix, ending]]
+	$var|raw_mod	(prefix $var ending)
+	simple modifiers still allowed: [simp_mod => func_name]
+	$var|simp_mod	func_name( $var )
+	
+	common modifiers introduced (aka static modifiers): add_common_modifiers()
+	per-instance modifiers still allowed via: add_modifiers()
+*/
