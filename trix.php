@@ -65,8 +65,11 @@ abstract class base_trix // modifiers layer
 	{ return $this->mod_map[$alias] ?? self::$mod_map_common[$alias] ?? false; }
 	
 	// apply
-	static protected function modifier_apply($expression, $mod)
-	{ return is_array($mod) ? ($mod[0] . $expression . $mod[1]) : ($mod .'( '. $expression .' )'); }
+	static protected function modifier_apply($expression, $mod, $sub)
+	{
+		$sub = is_string($sub) ? ('[\''. $sub .'\']') : '';
+		return is_array($mod) ? ($mod[0] . $expression . $mod[1]) : ($mod . $sub .'( '. $expression .' )');
+	}
 	
 	// internal
 	static protected function mod_join_to($map, &$hive)
@@ -91,7 +94,7 @@ class parser_trix extends base_trix // conversion layer
 	const
 	name_char = 'a-zA-Z0-9_',
 	part_sub = '(?P<sub>(?:(?:\\.|\\-\\>)['. self::name_char .']+)*)',
-	part_mod = '(?P<mod>(?:\\|['. self::name_char .']*)*)',
+	part_mod = '(?P<mod>(?:\\|['. self::name_char .']*(?:\\.['. self::name_char .']*)?)*)',
 	part_member = '(?P<class>['. self::name_char .']+)(?P<dot>\\:|\\.)(?P<member>['. self::name_char .']+)';
 	
 	public
@@ -219,8 +222,13 @@ class parser_trix extends base_trix // conversion layer
 			$mods = preg_split('~\\|~u', $k, -1, PREG_SPLIT_NO_EMPTY);
 			if( count($mods) )
 			foreach( $mods as $modifier )
-			if( $mod = $this->modifier_find($modifier) )
-			$result = $this->modifier_apply($result, $mod);
+			{
+				if( count($parts = explode('.', $modifier)) == 2 )
+				list($modifier, $sub) = $parts; else $sub = null;
+				
+				if( $mod = $this->modifier_find($modifier) )
+				$result = $this->modifier_apply($result, $mod, $sub);
+			}
 		}
 		
 		$debug = $this->flag_debug ? (' /* '. $v .' */') : '';
@@ -260,8 +268,18 @@ class trix extends parser_trix
 }
 
 /*		CHANGELOG
+2017-04-05 #3
+	added	New modifier syntax introduced
+			
+			$trix->add_modifiers(['make_url', $callbacks]); // $callbacks should be array of closures or fn names
+			$user = ['user_id'=>55];
+				{$user|make_url.user_page}
+				echo $callbacks['user_page']($user);
+			$page = ['page_alias'=>'contacts']; 
+				{$page|make_url.static_page}
+				echo $callbacks['static_page']($page);
 2017-04-04 #2
-	also:	small fix
+	also:	Small fix
 2017-04-03 #1
 	added	static members (class constant, class static variable)
 			{&lane.path}
