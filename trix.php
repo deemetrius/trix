@@ -60,15 +60,21 @@ abstract class base_trix // modifiers layer
 	static public function add_common_modifiers($map)
 	{ self::mod_join_to($map, self::$mod_map_common); }
 	
-	// find
-	protected function modifier_find($alias)
-	{ return $this->mod_map[$alias] ?? self::$mod_map_common[$alias] ?? false; }
-	
-	// apply
-	static protected function modifier_apply($expression, $mod, $sub)
+	// find and apply
+	protected $modifier_applicator = function($expr, $alias)
 	{
-		$sub = is_string($sub) ? ('[\''. $sub .'\']') : '';
-		return is_array($mod) ? ($mod[0] . $expression . $mod[1]) : ($mod . $sub .'( '. $expression .' )');
+		// sub_modifier ~ $row|url.user_page
+		if( count($parts = explode('.', $alias)) == 2 )
+		{
+			[$alias, $sub] = $parts;
+			$sub = '[\''. $sub .'\']';
+		} else $sub = '';
+		
+		// find then apply
+		if( $mod = $this->mod_map[$alias] ?? self::$mod_map_common[$alias] ?? false; )
+		$expr = is_array($mod) ? ($mod[0] . $expr . $mod[1]) : ($mod . $sub .'( '. $expr .' )');
+		
+		return $expr;
 	}
 	
 	// internal
@@ -92,10 +98,16 @@ abstract class base_trix // modifiers layer
 class parser_trix extends base_trix // conversion layer
 {
 	const
-	name_char = 'a-zA-Z0-9_',
-	part_sub = '(?P<sub>(?:(?:\\.|\\-\\>)['. self::name_char .']+)*)',
-	part_mod = '(?P<mod>(?:\\|['. self::name_char .']*(?:\\.['. self::name_char .']*)?)*)',
-	part_member = '(?P<class>['. self::name_char .']+)(?P<dot>\\:|\\.)(?P<member>['. self::name_char .']+)';
+	var_name = '[a-zA-Z_][a-zA-Z0-9_]*',
+	fld_name = self::var_name, // b in $a->b stays $a->b
+	sub_name = '[a-zA-Z0-9_]+', // 1 in $a.1 becomes $a['1']
+	mod_name = self::sub_name,
+	part_mods = '(?P<mod>\\|(?:'. self::mod_name .'(?:\\.'. self::sub_name .')?)?)', // modifiers
+	part_target = '(?P<var>'. self::var_name .')(?P<sub>(?:\\.'. self::sub_name .
+		'|\\-\\>'. self::fld_name .')*)', // var-name + sub-items
+	pattern_is_var = '~^(?:&(?<class>'. self::var_name .')(?:\\:(?P<const>'. self::var_name .')|\\.'.
+		self::part_target .')|\\$'. self::part_target .')'. self::part_mods .'$~u',
+	name_char = 'a-zA-Z0-9_';
 	
 	public
 	$parts = [],
@@ -140,44 +152,17 @@ class parser_trix extends base_trix // conversion layer
 		];
 		if( $check = $tokens[$v] ?? false )
 		{
-			list($type, $result) = $check;
+			[$type, $result] = $check;
 			$tokens = ['tag' => ['<?php ', ' ?>']];
 			if( $check = $tokens[$type] ?? false )
 			$result = $check[0] . $result . $check[1];
 			break;
 		}
 		
-		/* // ksi ~ variant of next block about var
-		'~^\\$([' % &.name_char ']+)' &.part_sub &.part_mod '$~u' =>
-		$pattern preg_match $v $matches ? #0 :
-		'~^&' % &.part_member &.part_sub &.part_mod '$~u' =>
-		$pattern preg_match $v $matches ? #1 :
-		# ; => $case is &bool ?
-			$.default_modifier !== '' and
-			$ process_default_modifiers $v and
-			$pattern preg_match $v $matches ? $.skip_count += 1 :
-			$ deduce_variable $v $matches $case => $result ;
-			# break#
-		;
-		*/
-		// variable (or static member)
-		$case = null;
-		$pattern = '~^\\$(['. self::name_char .']+)'. self::part_sub . self::part_mod .'$~u';
-		if( preg_match($pattern, $v, $matches) ) $case = false;
-		else
+		// variable / static member
+		if( preg_match(self::pattern_is_var, $v, $matches) )
 		{
-			// static member
-			$pattern = '~^&'. self::part_member . self::part_sub . self::part_mod .'$~u';
-			if( preg_match($pattern, $v, $matches) ) $case = true;
-		}
-		if( is_bool($case) )
-		{
-			if(
-				$this->default_modifier !== '' &&
-				$this->process_default_modifiers($v) &&
-				(!preg_match($pattern, $v, $matches)) // matches recapture
-			) /*skip!*/ $this->skip_count += 1; else
-			$result = $this->deduce_variable($v, $matches, $case);
+			$result = $this->deduce_variable($v, $matches);
 			break;
 		}
 		
@@ -197,46 +182,44 @@ class parser_trix extends base_trix // conversion layer
 		return $result;
 	}
 	
-	protected function process_default_modifiers(&$v)
+	protected function deduce_variable($v, $matches)
 	{
-		$count = null;
-		$v2 = preg_replace('~\\|(?!['. self::name_char .'])~u', $this->default_modifier, $v, -1, $count);
-		if( $count ) $v = $v2;
-		
-		return $count;
-	}
-	
-	protected function deduce_variable($v, $matches, $is_static = false)
-	{
-		$result = $is_static ? (
-			$matches['class'] .'::'. ($matches['dot'] == '.' ? '$' : '') . $matches['member']
-		) : ('$'. $matches[1]);
-		
-		// process array elements and class properties
-		if( $k = $matches['sub'] ?? false )
-		$result .= preg_replace('~\\.(['. self::name_char .']+)~u', "['\\1']", $k);
-		
-		// process modifiers
-		if( $k = $matches['mod'] ?? false )
+		// class const
+		if( $step = $matches['const'] ?? false )
+		$result = $matches['class'] .'::'. $step; else
 		{
-			$mods = preg_split('~\\|~u', $k, -1, PREG_SPLIT_NO_EMPTY);
-			if( count($mods) )
-			foreach( $mods as $modifier )
-			{
-				if( count($parts = explode('.', $modifier)) == 2 )
-				list($modifier, $sub) = $parts; else $sub = null;
-				
-				if( $mod = $this->modifier_find($modifier) )
-				$result = $this->modifier_apply($result, $mod, $sub);
-			}
+			// var or class static var
+			$result = (($step = $matches['class'] ?? false) ? ($step .'::$') : '$') . $matches['var'];
+			
+			// array elements and class fields
+			if( $step = $matches['sub'] ?? false )
+			$result .= preg_replace('~\\.('. self::sub_name .')~u', "['\\1']", $step);
 		}
 		
-		$debug = $this->flag_debug ? (' /* '. $v .' */') : '';
-		return '<?php echo '. $result .';'. $debug .' ?>';
+		// modifiers
+		if( $step = $matches['mod'] ?? false )
+		{
+			// default mod turns to exact
+			if( $this->default_modifier !== '' )
+			{
+				$count = null;
+				$tmp = preg_replace(
+					'~\\|(?!['. self::name_char .'])~u',
+					$this->default_modifier, $step, -1, $count
+				);
+				if( $count ) $step = $tmp;
+			}
+			
+			if( count($mods = preg_split('~\\|~u', $step, -1, PREG_SPLIT_NO_EMPTY)) )
+			array_reduce($mods, $this->modifier_applicator, $result);
+		}
+		
+		$step = $this->flag_debug ? (' /* '. $v .' */') : '';
+		return '<?php echo '. $result .';'. $step .' ?>';
 	}
 }
 
-class trix extends parser_trix
+class trix extends parser_trix // need recheck
 {
 	public function __construct($file, $default_modifier = '')
 	{ $this->load($file, $default_modifier); }
@@ -265,9 +248,15 @@ class trix extends parser_trix
 		return (is_string($file) && is_array($this->parts) /*&& is_writable($file)*/) ?
 		file_put_contents($file, $this->parts) : null;
 	}
+	
+	public function clean_up()
+	{} // empty parts
 }
 
 /*		CHANGELOG
+2017-04-11 #2
+	WIP		Some conversion improvement going (vars, class staic members)
+			Seems release is soon (but also manual is required)
 2017-04-05 #3
 	added	New modifier syntax introduced
 			
