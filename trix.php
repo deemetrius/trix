@@ -13,7 +13,7 @@ So I intended to make it simple and fast as I can:
 * by Not to put any standart modifiers inside
 That fat guy spreaded to lots of files is not my style
 
-requirements: PHP 7
+requirements: PHP 7.1
 
 	#	tpl/sample_template.tpl
 <p>Do you like {$fruit|}?</p>
@@ -51,14 +51,17 @@ abstract class base_trix // modifiers layer
 	// local
 	private $mod_map = [];
 	
-	public function add_modifiers($map)
+	public function add_modifiers(array $map)
 	{ self::mod_join_to($map, $this->mod_map); }
 	
 	// common
 	static private $mod_map_common = [];
 	
-	static public function add_common_modifiers($map)
+	static public function add_common_modifiers(array $map)
 	{ self::mod_join_to($map, self::$mod_map_common); }
+	
+	// apply but absent
+	public $skip_mod = [];
 	
 	// find and apply
 	protected $modifier_applicator = function($expr, $alias)
@@ -71,26 +74,28 @@ abstract class base_trix // modifiers layer
 		} else $sub = '';
 		
 		// find then apply
-		if( $mod = $this->mod_map[$alias] ?? self::$mod_map_common[$alias] ?? false; )
+		if( $mod = $this->mod_map[$alias] ?? self::$mod_map_common[$alias] ?? false )
 		$expr = is_array($mod) ? ($mod[0] . $expr . $mod[1]) : ($mod . $sub .'( '. $expr .' )');
+		elseif( isset($this->skip_mod[$alias]) )
+		$this->skip_mod[$alias] += 1; else $this->skip_mod[$alias] = 1;
 		
 		return $expr;
 	}
 	
 	// internal
-	static protected function mod_join_to($map, &$hive)
+	static protected function mod_join_to(array $map, &$hive)
 	{
 		if( !is_array($hive) ) $hive = [];
 		
-		if( is_array($map) && count($map) )
-		foreach( $map as $alias => $expression )
-		if( is_string($expression) )
-		$hive[$alias] = $expression;
-		elseif( is_array($expression) && count($expression) > 1 )
+		if( count($map) )
+		foreach( $map as $alias => $expr )
+		if( is_string($expr) )
+		$hive[$alias] = $expr;
+		elseif( is_array($expr) && count($expr) > 1 )
 		{
-			$expression = array_values($expression);
-			if( is_string($expression[0]) && is_string($expression[1]) )
-			$hive[$alias] = $expression;
+			$expr = array_values($expr);
+			if( is_string($expr[0]) && is_string($expr[1]) )
+			$hive[$alias] = $expr;
 		}
 	}
 }
@@ -98,16 +103,16 @@ abstract class base_trix // modifiers layer
 class parser_trix extends base_trix // conversion layer
 {
 	const
-	var_name = '[a-zA-Z_][a-zA-Z0-9_]*',
+	sub_char = '[a-zA-Z0-9_]',
+	var_name = '[a-zA-Z_]'. self::sub_char .'*',
 	fld_name = self::var_name, // b in $a->b stays $a->b
-	sub_name = '[a-zA-Z0-9_]+', // 1 in $a.1 becomes $a['1']
+	sub_name = self::sub_char .'+', // 1 in $a.1 becomes $a['1']
 	mod_name = self::sub_name,
 	part_mods = '(?P<mod>\\|(?:'. self::mod_name .'(?:\\.'. self::sub_name .')?)?)', // modifiers
 	part_target = '(?P<var>'. self::var_name .')(?P<sub>(?:\\.'. self::sub_name .
 		'|\\-\\>'. self::fld_name .')*)', // var-name + sub-items
 	pattern_is_var = '~^(?:&(?<class>'. self::var_name .')(?:\\:(?P<const>'. self::var_name .')|\\.'.
-		self::part_target .')|\\$'. self::part_target .')'. self::part_mods .'$~u',
-	name_char = 'a-zA-Z0-9_';
+		self::part_target .')|\\$'. self::part_target .')'. self::part_mods .'$~u';
 	
 	public
 	$parts = [],
@@ -204,7 +209,7 @@ class parser_trix extends base_trix // conversion layer
 			{
 				$count = null;
 				$tmp = preg_replace(
-					'~\\|(?!['. self::name_char .'])~u',
+					'~\\|(?!'. self::sub_char .')~u',
 					$this->default_modifier, $step, -1, $count
 				);
 				if( $count ) $step = $tmp;
@@ -221,21 +226,22 @@ class parser_trix extends base_trix // conversion layer
 
 class trix extends parser_trix // need recheck
 {
-	public function __construct($file, $default_modifier = '')
+	public function __construct(string $file, string $default_modifier = '')
 	{ $this->load($file, $default_modifier); }
 	
-	public function load($file, $default_modifier = '')
+	public function load(string $file, string $default_modifier = '')
 	{
-		if( is_string($default_modifier) && preg_match('~^\\|['. self::name_char .']+$~u', $default_modifier) )
-		$this->default_modifier = $default_modifier;
+		$this->default_modifier =
+		preg_match('~^'. self::part_mods .'$~u', $default_modifier) ? $default_modifier : '';
 		
-		$this->parts = (is_string($file) && is_readable($file) && ($code=file_get_contents($file)) !== false)?
-		self::parse($code) : [];
+		$this->parts = (
+			is_readable($file) && ($code=file_get_contents($file)) !== false
+		) ? self::parse($code) : [];
 	}
 	
 	public function convert()
 	{
-		$this->skip_count = 0;
+		$this->skip_count = 0; $this->skip_mod = [];
 		foreach( $this->parts as $k => &$v )
 		if( $k % 2 && mb_strlen($v) )
 		$v = $this->deduce($v);
@@ -243,17 +249,23 @@ class trix extends parser_trix // need recheck
 		return $this;
 	}
 	
-	public function save_compiled($file)
+	public function save_compiled(string $file)
 	{
-		return (is_string($file) && is_array($this->parts) /*&& is_writable($file)*/) ?
+		return (count($this->parts) /*&& is_writable($file)*/) ?
 		file_put_contents($file, $this->parts) : null;
 	}
 	
-	public function clean_up()
-	{} // empty parts
+	public function clear()
+	{ $this->parts = $this->skip_mod = []; }
 }
 
 /*		CHANGELOG
+2017-04-12 #3
+	WIP		Need some testing!
+	added	$trix->skip_mod
+			$trix->clear()
+	also:	Some type checking operations are remade as type hints
+			I think about to move CHANGELOG and USAGE to separate file: trix.about.txt
 2017-04-11 #2
 	WIP		Some conversion improvement going (vars, class staic members)
 			Seems release is soon (but also manual is required)
