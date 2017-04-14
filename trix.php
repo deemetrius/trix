@@ -48,42 +48,44 @@ include 'tplc/sample_template.php'; // fetch
 
 abstract class base_trix // modifiers layer
 {
-	// local
-	private $mod_map = [];
+	private $mod_map = []; // local
+	static private $mod_map_common = []; // common
 	
+	// local
 	public function add_modifiers(array $map)
-	{ self::mod_join_to($map, $this->mod_map); }
+	{ self::mods_to_hive($map, $this->mod_map); }
 	
 	// common
-	static private $mod_map_common = [];
-	
 	static public function add_common_modifiers(array $map)
-	{ self::mod_join_to($map, self::$mod_map_common); }
+	{ self::mods_to_hive($map, self::$mod_map_common); }
 	
-	// apply but absent
-	public $skip_mod = [];
+	public $skip_mod = []; // apply but absent
+	protected $modifier_applicator; // fn: find and apply
 	
-	// find and apply
-	protected $modifier_applicator = function($expr, $alias)
+	protected function __construct()
 	{
-		// sub_modifier ~ $row|url.user_page
-		if( count($parts = explode('.', $alias)) == 2 )
+		// array_reduce arg
+		$this->modifier_applicator = function($expr, $alias)
 		{
-			[$alias, $sub] = $parts;
-			$sub = '[\''. $sub .'\']';
-		} else $sub = '';
-		
-		// find then apply
-		if( $mod = $this->mod_map[$alias] ?? self::$mod_map_common[$alias] ?? false )
-		$expr = is_array($mod) ? ($mod[0] . $expr . $mod[1]) : ($mod . $sub .'( '. $expr .' )');
-		elseif( isset($this->skip_mod[$alias]) )
-		$this->skip_mod[$alias] += 1; else $this->skip_mod[$alias] = 1;
-		
-		return $expr;
+			// sub_modifier ~ $row|url.user_page
+			if( count($parts = explode('.', $alias)) == 2 )
+			{
+				[$alias, $sub] = $parts;
+				$sub = '[\''. $sub .'\']';
+			} else $sub = '';
+			
+			// find then apply
+			if( $mod = $this->mod_map[$alias] ?? self::$mod_map_common[$alias] ?? false )
+			$expr = is_array($mod) ? ($mod[0] . $expr . $mod[1]) : ($mod . $sub .'( '. $expr .' )');
+			elseif( isset($this->skip_mod[$alias]) )
+			$this->skip_mod[$alias] += 1; else $this->skip_mod[$alias] = 1;
+			
+			return $expr;
+		}
 	}
 	
 	// internal
-	static protected function mod_join_to(array $map, &$hive)
+	static protected function mods_to_hive(array $map, &$hive)
 	{
 		if( !is_array($hive) ) $hive = [];
 		
@@ -107,8 +109,8 @@ class parser_trix extends base_trix // conversion layer
 	var_name = '[a-zA-Z_]'. self::sub_char .'*',
 	fld_name = self::var_name, // b in $a->b stays $a->b
 	sub_name = self::sub_char .'+', // 1 in $a.1 becomes $a['1']
-	mod_name = self::sub_name,
-	part_mods = '(?P<mod>\\|(?:'. self::mod_name .'(?:\\.'. self::sub_name .')?)?)', // modifiers
+	mod_name = self::sub_name, // esc in $a|esc
+	part_mods = '(?P<mod>(?:\\|'. self::mod_name .'(?:\\.'. self::sub_name .')?)*)', // modifiers
 	part_target = '(?P<var>'. self::var_name .')(?P<sub>(?:\\.'. self::sub_name .
 		'|\\-\\>'. self::fld_name .')*)', // var-name + sub-items
 	pattern_is_var = '~^(?:&(?<class>'. self::var_name .')(?:\\:(?P<const>'. self::var_name .')|\\.'.
@@ -158,9 +160,11 @@ class parser_trix extends base_trix // conversion layer
 		if( $check = $tokens[$v] ?? false )
 		{
 			[$type, $result] = $check;
-			$tokens = ['tag' => ['<?php ', ' ?>']];
+			/* $tokens = ['tag' => ['<?php ', ' ?>']];
 			if( $check = $tokens[$type] ?? false )
-			$result = $check[0] . $result . $check[1];
+			$result = $check[0] . $result . $check[1]; */
+			if( ! is_null($type) )
+			$result = '<?php '. $result .' ?>';
 			break;
 		}
 		
@@ -224,19 +228,27 @@ class parser_trix extends base_trix // conversion layer
 	}
 }
 
-class trix extends parser_trix // need recheck
+class trix extends parser_trix
 {
-	public function __construct(string $file, string $default_modifier = '')
-	{ $this->load($file, $default_modifier); }
-	
-	public function load(string $file, string $default_modifier = '')
+	public function __construct(?string $file = null, string $default_modifier = '')
 	{
-		$this->default_modifier =
-		preg_match('~^'. self::part_mods .'$~u', $default_modifier) ? $default_modifier : '';
+		parent::__construct();
+		$this->default_modifier($default_modifier);
+		if( !is_null($file) ) $this->load($file);
+	}
+	
+	public function default_modifier(string $default_modifier = '')
+	{
+		$this->default_modifier = preg_match('~^'. self::part_mods .'$~u', $default_modifier) ?
+		$default_modifier : '';
+	}
+	
+	public function load(string $file) // recheck later
+	{
+		$this->parts = (is_readable($file) &&
+		($code=file_get_contents($file)) !== false) ? self::parse($code) : [];
 		
-		$this->parts = (
-			is_readable($file) && ($code=file_get_contents($file)) !== false
-		) ? self::parse($code) : [];
+		return $this;
 	}
 	
 	public function convert()
@@ -255,11 +267,20 @@ class trix extends parser_trix // need recheck
 		file_put_contents($file, $this->parts) : null;
 	}
 	
+	public function __invoke(string $src, string $dest)
+	{ return $this->load($src)->convert()->save_compiled($dest); }
+	
 	public function clear()
 	{ $this->parts = $this->skip_mod = []; }
 }
 
 /*		CHANGELOG
+2017-04-14 #5 06:17 SPb
+	WIP		Still not tested due to my digma eve 10.3 not with me ...
+	added	defult_modifier() ~ setter checker (moved-out from load() to separate fn)
+			__invoke() ~ for shorter usage
+	also:	Small change: plain tokens deduction, modifiers layer
+			I think about to rewrite it whole in ksi-lang and adopt ksi_to_php translator LoL!
 2017-04-12 #3
 	WIP		Need some testing!
 	added	$trix->skip_mod
